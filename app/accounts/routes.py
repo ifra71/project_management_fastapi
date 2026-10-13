@@ -1,9 +1,16 @@
-from fastapi import APIRouter, HTTPException, status
+
+from fastapi import APIRouter, Depends, HTTPException, status
 from pymongo.errors import DuplicateKeyError
 
 from app.accounts.schemas import UserCreate, UserLogin, UserResponse
-from app.core.security import hash_password, verify_password
+from app.core.dependencies import get_current_user
+from app.core.security import (
+    create_access_token,
+    hash_password,
+    verify_password,
+)
 from app.db.database import database
+
 
 router = APIRouter(prefix="/api/accounts", tags=["Accounts"])
 
@@ -14,12 +21,14 @@ router = APIRouter(prefix="/api/accounts", tags=["Accounts"])
     status_code=status.HTTP_201_CREATED,
 )
 async def register_user(user: UserCreate):
-    existing_user = await database["users"].find_one({"email": user.email})
+    existing_user = await database["users"].find_one(
+        {"email": user.email}
+    )
 
     if existing_user:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=" email already exists",
+            detail="Email already exists",
         )
 
     user_document = {
@@ -33,7 +42,7 @@ async def register_user(user: UserCreate):
     except DuplicateKeyError:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=" email already exists",
+            detail="Email already exists",
         )
 
     return UserResponse(
@@ -45,7 +54,9 @@ async def register_user(user: UserCreate):
 
 @router.post("/login")
 async def login_user(user: UserLogin):
-    existing_user = await database["users"].find_one({"email": user.email})
+    existing_user = await database["users"].find_one(
+        {"email": user.email}
+    )
 
     if not existing_user or not verify_password(
         user.password,
@@ -56,4 +67,20 @@ async def login_user(user: UserLogin):
             detail="Invalid email or password",
         )
 
-    return {"message": "login successful"}
+    access_token = create_access_token(str(existing_user["_id"]))
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+    }
+
+
+@router.get("/me", response_model=UserResponse)
+async def read_current_user(
+    current_user: dict = Depends(get_current_user),
+):
+    return UserResponse(
+        id=str(current_user["_id"]),
+        email=current_user["email"],
+        name=current_user["name"],
+    )

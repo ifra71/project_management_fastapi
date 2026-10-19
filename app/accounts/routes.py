@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pymongo.errors import DuplicateKeyError
 
@@ -10,8 +12,9 @@ from app.core.security import (
 )
 from app.db.database import database
 
-
 router = APIRouter(prefix="/api/accounts", tags=["Accounts"])
+
+logger = logging.getLogger(__name__)
 
 
 @router.post(
@@ -44,8 +47,32 @@ async def register_user(user: UserCreate):
             detail="Email already exists",
         )
 
+    user_id = str(result.inserted_id)
+
+    profile_document = {
+        "user_id": user_id,
+        "role": user.role,
+        "contact_number": user.contact_number,
+        "profile_picture": None,
+    }
+
+    try:
+        await database["profiles"].insert_one(profile_document)
+    except Exception:
+        await database["users"].delete_one({"_id": result.inserted_id})
+        logger.exception(
+            "Profile creation failed for user: %s",
+            user.email,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Registration failed. Please try again.",
+        )
+
+    logger.info("New user registered: %s", user.email)
+
     return UserResponse(
-        id=str(result.inserted_id),
+        id=user_id,
         email=user.email,
         name=user.name,
     )
@@ -61,12 +88,17 @@ async def login_user(user: UserLogin):
         user.password,
         existing_user["hashed_password"],
     ):
+        logger.warning("Failed login attempt for %s", user.email)
+
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
     access_token = create_access_token(str(existing_user["_id"]))
+
+    logger.info("User logged in: %s", user.email)
 
     return {
         "access_token": access_token,

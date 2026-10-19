@@ -7,7 +7,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from app.core.dependencies import get_current_user
 from app.db.database import database
 from app.projects.schemas import ProjectCreate, ProjectResponse, ProjectUpdate
-
+from app.timeline.service import create_timeline_event
+from app.worker.tasks import send_notification
 
 router = APIRouter(prefix="/api/projects", tags=["Projects"])
 
@@ -58,11 +59,25 @@ async def create_project(
     }
 
     result = await database["projects"].insert_one(project_data)
+    project_id = str(result.inserted_id)
+
+    await create_timeline_event(
+        event_type="project_created",
+        project_id=project_id,
+        user_id=user_id,
+    )
+
+    for member_id in set(project.team_members):
+        if member_id != user_id:
+            send_notification.delay(
+                member_id,
+                f"You have been added to the project: {project.title}",
+            )
 
     logger.info("Project created by user %s", user_id)
 
     return {
-        "id": str(result.inserted_id),
+        "id": project_id,
         **project_data,
     }
 
@@ -82,10 +97,8 @@ async def list_projects(
         }
     ).to_list(length=100)
 
-    project_list = []
-
-    for project in projects:
-        project_list.append({
+    return [
+        {
             "id": str(project["_id"]),
             "title": project["title"],
             "description": project.get("description"),
@@ -93,9 +106,9 @@ async def list_projects(
             "end_date": project["end_date"],
             "team_members": project.get("team_members", []),
             "owner_id": project["owner_id"],
-        })
-
-    return project_list
+        }
+        for project in projects
+    ]
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)
@@ -220,10 +233,27 @@ async def update_project(
             detail="End date cannot be before start date",
         )
 
-    await database["projects"].update_one(
+    old_members = set(project.get("team_members", []))
+    new_members = set(update_data.get("team_members", old_members))
+
+    result = await database["projects"].update_one(
         {"_id": ObjectId(project_id), "owner_id": user_id},
         {"$set": update_data},
     )
+
+    if result.modified_count > 0:
+        await create_timeline_event(
+            event_type="project_updated",
+            project_id=project_id,
+            user_id=user_id,
+        )
+
+    for member_id in new_members - old_members:
+        if member_id != user_id:
+            send_notification.delay(
+                member_id,
+                f"You have been added to the project: {project['title']}",
+            )
 
     updated_project = await database["projects"].find_one(
         {"_id": ObjectId(project_id)}
@@ -258,6 +288,19 @@ async def delete_project(
 
     user_id = str(current_user["_id"])
 
+    project = await database["projects"].find_one(
+        {
+            "_id": ObjectId(project_id),
+            "owner_id": user_id,
+        }
+    )
+
+    if project is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Project not found",
+        )
+
     result = await database["projects"].delete_one(
         {
             "_id": ObjectId(project_id),
@@ -270,5 +313,11 @@ async def delete_project(
             status_code=404,
             detail="Project not found",
         )
+
+    await create_timeline_event(
+        event_type="project_deleted",
+        project_id=project_id,
+        user_id=user_id,
+    )
 
     logger.info("Project deleted by user %s", user_id)

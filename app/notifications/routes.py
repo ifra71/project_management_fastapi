@@ -1,14 +1,14 @@
 import logging
 
-from datetime import datetime, timezone
-
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.core.dependencies import get_current_user
 from app.db.database import database
-from app.notifications.schemas import NotificationResponse, NotificationUpdate
-
+from app.notifications.schemas import (
+    NotificationResponse,
+    NotificationUpdate,
+)
 
 router = APIRouter(prefix="/api/notifications", tags=["Notifications"])
 
@@ -25,18 +25,16 @@ async def list_notifications(
         {"user_id": user_id}
     ).sort("created_at", -1).to_list(length=100)
 
-    notification_list = []
-
-    for notification in notifications:
-        notification_list.append({
+    return [
+        {
             "id": str(notification["_id"]),
             "text": notification["text"],
             "user_id": notification["user_id"],
             "created_at": notification["created_at"],
             "mark_read": notification.get("mark_read", False),
-        })
-
-    return notification_list
+        }
+        for notification in notifications
+    ]
 
 
 @router.patch("/{notification_id}", response_model=NotificationResponse)
@@ -53,20 +51,7 @@ async def update_notification(
 
     user_id = str(current_user["_id"])
 
-    notification = await database["notifications"].find_one(
-        {
-            "_id": ObjectId(notification_id),
-            "user_id": user_id,
-        }
-    )
-
-    if notification is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Notification not found",
-        )
-
-    await database["notifications"].update_one(
+    result = await database["notifications"].update_one(
         {
             "_id": ObjectId(notification_id),
             "user_id": user_id,
@@ -78,18 +63,27 @@ async def update_notification(
         },
     )
 
-    updated_notification = await database["notifications"].find_one(
-        {"_id": ObjectId(notification_id)}
+    if result.matched_count == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="Notification not found",
+        )
+
+    notification = await database["notifications"].find_one(
+        {
+            "_id": ObjectId(notification_id),
+            "user_id": user_id,
+        }
     )
 
     logger.info("Notification updated for user %s", user_id)
 
     return {
-        "id": str(updated_notification["_id"]),
-        "text": updated_notification["text"],
-        "user_id": updated_notification["user_id"],
-        "created_at": updated_notification["created_at"],
-        "mark_read": updated_notification.get("mark_read", False),
+        "id": str(notification["_id"]),
+        "text": notification["text"],
+        "user_id": notification["user_id"],
+        "created_at": notification["created_at"],
+        "mark_read": notification.get("mark_read", False),
     }
 
 

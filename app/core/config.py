@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     mongodb_url: str = "mongodb://localhost:27017"
     database_name: str = "project_management"
 
+    redis_url: str = "redis://localhost:6380/0"
+
     jwt_secret_key: str
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 30

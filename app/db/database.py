@@ -11,6 +11,7 @@ database = client[settings.database_name]
 async def connect_to_mongodb():
     await client.admin.command("ping")
     await database["users"].create_index("email", unique=True)
+    await database["profiles"].create_index("user_id", unique=True)
     print("MongoDB connection successful")
 
 

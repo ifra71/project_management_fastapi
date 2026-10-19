@@ -6,7 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from app.core.dependencies import get_current_user
 from app.db.database import database
 from app.tasks.schemas import TaskCreate, TaskUpdate, TaskResponse
-
+from app.timeline.service import create_timeline_event
+from app.worker.tasks import send_notification
 
 router = APIRouter(prefix="/api/tasks", tags=["Tasks"])
 
@@ -25,10 +26,7 @@ async def create_task(
     user_id = str(current_user["_id"])
 
     if not ObjectId.is_valid(task.project_id):
-        raise HTTPException(
-            status_code=404,
-            detail="Project not found",
-        )
+        raise HTTPException(status_code=404, detail="Project not found")
 
     project = await database["projects"].find_one(
         {
@@ -41,27 +39,18 @@ async def create_task(
     )
 
     if project is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Project not found",
-        )
+        raise HTTPException(status_code=404, detail="Project not found")
 
     if task.assignee_id is not None:
         if not ObjectId.is_valid(task.assignee_id):
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid assignee ID",
-            )
+            raise HTTPException(status_code=400, detail="Invalid assignee ID")
 
         member = await database["users"].find_one(
             {"_id": ObjectId(task.assignee_id)}
         )
 
         if member is None:
-            raise HTTPException(
-                status_code=404,
-                detail="Assignee not found",
-            )
+            raise HTTPException(status_code=404, detail="Assignee not found")
 
         if (
             task.assignee_id != project["owner_id"]
@@ -82,11 +71,24 @@ async def create_task(
     }
 
     result = await database["tasks"].insert_one(task_data)
+    task_id = str(result.inserted_id)
+
+    await create_timeline_event(
+        event_type="task_created",
+        project_id=task.project_id,
+        user_id=user_id,
+    )
+
+    if task.assignee_id and task.assignee_id != user_id:
+        send_notification.delay(
+            task.assignee_id,
+            f"You have been assigned a new task: {task.title}",
+        )
 
     logger.info("Task created by user %s", user_id)
 
     return {
-        "id": str(result.inserted_id),
+        "id": task_id,
         **task_data,
     }
 
@@ -133,10 +135,7 @@ async def get_task(
     current_user: dict = Depends(get_current_user),
 ):
     if not ObjectId.is_valid(task_id):
-        raise HTTPException(
-            status_code=404,
-            detail="Task not found",
-        )
+        raise HTTPException(status_code=404, detail="Task not found")
 
     user_id = str(current_user["_id"])
 
@@ -145,10 +144,7 @@ async def get_task(
     )
 
     if task is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Task not found",
-        )
+        raise HTTPException(status_code=404, detail="Task not found")
 
     project = await database["projects"].find_one(
         {
@@ -161,10 +157,7 @@ async def get_task(
     )
 
     if project is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Task not found",
-        )
+        raise HTTPException(status_code=404, detail="Task not found")
 
     return {
         "id": str(task["_id"]),
@@ -183,10 +176,7 @@ async def update_task(
     current_user: dict = Depends(get_current_user),
 ):
     if not ObjectId.is_valid(task_id):
-        raise HTTPException(
-            status_code=404,
-            detail="Task not found",
-        )
+        raise HTTPException(status_code=404, detail="Task not found")
 
     user_id = str(current_user["_id"])
 
@@ -195,10 +185,7 @@ async def update_task(
     )
 
     if task is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Task not found",
-        )
+        raise HTTPException(status_code=404, detail="Task not found")
 
     project = await database["projects"].find_one(
         {
@@ -211,10 +198,7 @@ async def update_task(
     )
 
     if project is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Task not found",
-        )
+        raise HTTPException(status_code=404, detail="Task not found")
 
     update_data = task_update.model_dump(exclude_unset=True)
 
@@ -253,14 +237,35 @@ async def update_task(
                     detail="Assignee must belong to the project team",
                 )
 
-    await database["tasks"].update_one(
+    result = await database["tasks"].update_one(
         {"_id": ObjectId(task_id)},
         {"$set": update_data},
     )
 
+    if result.modified_count > 0:
+        await create_timeline_event(
+            event_type="task_updated",
+            project_id=task["project_id"],
+            user_id=user_id,
+        )
+
     updated_task = await database["tasks"].find_one(
         {"_id": ObjectId(task_id)}
     )
+
+    if "assignee_id" in update_data:
+        new_assignee_id = update_data["assignee_id"]
+        old_assignee_id = task.get("assignee_id")
+
+        if (
+            new_assignee_id
+            and new_assignee_id != old_assignee_id
+            and new_assignee_id != user_id
+        ):
+            send_notification.delay(
+                new_assignee_id,
+                f"You have been assigned a task: {updated_task['title']}",
+            )
 
     logger.info("Task updated by user %s", user_id)
 
@@ -283,10 +288,7 @@ async def delete_task(
     current_user: dict = Depends(get_current_user),
 ):
     if not ObjectId.is_valid(task_id):
-        raise HTTPException(
-            status_code=404,
-            detail="Task not found",
-        )
+        raise HTTPException(status_code=404, detail="Task not found")
 
     user_id = str(current_user["_id"])
 
@@ -295,10 +297,7 @@ async def delete_task(
     )
 
     if task is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Task not found",
-        )
+        raise HTTPException(status_code=404, detail="Task not found")
 
     project = await database["projects"].find_one(
         {
@@ -311,13 +310,19 @@ async def delete_task(
     )
 
     if project is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Task not found",
-        )
+        raise HTTPException(status_code=404, detail="Task not found")
 
-    await database["tasks"].delete_one(
+    result = await database["tasks"].delete_one(
         {"_id": ObjectId(task_id)}
+    )
+
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    await create_timeline_event(
+        event_type="task_deleted",
+        project_id=task["project_id"],
+        user_id=user_id,
     )
 
     logger.info("Task deleted by user %s", user_id)

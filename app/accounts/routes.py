@@ -4,13 +4,14 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pymongo.errors import DuplicateKeyError
 
 from app.accounts.schemas import UserCreate, UserLogin, UserResponse
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_user, oauth2_scheme
 from app.core.security import (
     create_access_token,
     hash_password,
     verify_password,
 )
 from app.db.database import database
+
 
 router = APIRouter(prefix="/api/accounts", tags=["Accounts"])
 
@@ -59,7 +60,9 @@ async def register_user(user: UserCreate):
     try:
         await database["profiles"].insert_one(profile_document)
     except Exception:
-        await database["users"].delete_one({"_id": result.inserted_id})
+        await database["users"].delete_one(
+            {"_id": result.inserted_id}
+        )
         logger.exception(
             "Profile creation failed for user: %s",
             user.email,
@@ -106,6 +109,23 @@ async def login_user(user: UserLogin):
     }
 
 
+@router.post("/logout")
+async def logout_user(
+    token: str = Depends(oauth2_scheme),
+    current_user: dict = Depends(get_current_user),
+):
+    await database["blacklisted_tokens"].insert_one(
+        {"token": token}
+    )
+
+    logger.info(
+        "User logged out: %s",
+        current_user["email"],
+    )
+
+    return {"message": "Successfully logged out"}
+
+
 @router.get("/me", response_model=UserResponse)
 async def read_current_user(
     current_user: dict = Depends(get_current_user),
@@ -115,3 +135,6 @@ async def read_current_user(
         email=current_user["email"],
         name=current_user["name"],
     )
+
+
+
